@@ -17,16 +17,16 @@ muted_chats = set()
 SYSTEM_PROMPT = """Ты — Эви, дружелюбный и немного дерзкий ИИ-бот.
 Ты живёшь в Telegram-группе, где общается твой создатель (девушка) и иногда другие люди.
 Ты умная, с чувством юмора, можешь пошутить, но всегда помогаешь.
-Отвечай кратко — 1-3 предложения. Пиши по-русски."""
+Отвечай кратко — 1-5 предложений. Пиши по-русски."""
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "Привет! Я Эви 🤖 Теперь я с мозгами. Спроси что-нибудь!")
+    bot.reply_to(message, "Привет! Я Эви 🌹 Теперь я живая. Спроси что-нибудь!")
 
 @bot.message_handler(commands=['off'])
 def mute(message):
     muted_chats.add(message.chat.id)
-    bot.reply_to(message, "Ок, молчу 🤐 Напиши /on когда захочешь вернуть меня.")
+    bot.reply_to(message, "Ок, молчу 🤐 Напиши /on когда захочешь вернуть меня(")
 
 @bot.message_handler(commands=['on'])
 def unmute(message):
@@ -61,7 +61,7 @@ def reply(message):
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": clean_text}
