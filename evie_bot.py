@@ -53,8 +53,8 @@ def reply(message):
 # Логируем ВСЕ сообщения (задел под память)
 print(f"[{message.chat.type}] {message.from_user.first_name}: {text}")
 
-if is_group and not mentioned:
-    return
+if is_group and not mentioned :
+        return
 
     clean_text = text.replace(f"@{bot_username}", "").strip()
     if clean_text.lower().startswith("эви"):
