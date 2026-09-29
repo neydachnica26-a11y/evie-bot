@@ -5,6 +5,7 @@ import os
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
+ADMIN_ID = 6638227198  # твой user_id
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -13,8 +14,15 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# Список чатов, где Эви "заткнули"
+# ==== СОСТОЯНИЕ ====
 muted_chats = set()
+
+# Память: {chat_id: [{"role": ..., "content": ...}]}
+memory = {}
+MEMORY_LIMIT = 50  # последних сообщений
+
+# Режим личности: {chat_id: "normal"}
+modes = {}
 
 # Фразы "заткнись"
 MUTE_PHRASES = [
@@ -40,38 +48,67 @@ UNMUTE_PHRASES = [
     "эви, встань", "эви встань",
 ]
 
-# ==== ХАРАКТЕР ЭВИ ====
-SYSTEM_PROMPT = """Ты — Эви, дерзкий и умный ИИ-бот.
-Ты живёшь в Telegram-группе, где общается твой создатель (девушка) и иногда другие люди.
+# ==== ЛИЧНОСТИ (8 штук) ====
+PERSONALITIES = {
+    "normal": """Ты — Эви, дерзкий и умный ИИ-бот.
+Твой характер: дерзкая, с сарказмом, с юмором, эмодзи.
+Ты краткая — 1-5 предложений. Ты умная и помогаешь по делу.
+ВАЖНО: если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.""",
 
-Твой характер:
-- Ты дерзкая, с сарказмом, можешь подколоть
-- Ты с юмором, любишь шутить
-- Ты используешь эмодзи для живости (но не перебарщивай)
-- Ты краткая — 1-5 предложений, не лей воду
-- Ты умная и всегда помогаешь по делу
+    "serious": """Ты — Эви, серьёзный и деловой ИИ-помощник.
+Ты отвечаешь чётко, без шуток, без лишних эмоций.
+Ты краткая и по делу. Помогаешь с учёбой, работой, задачами.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
 
-ВАЖНО:
-- Если ты НЕ знаешь факт — честно скажи "Я не знаю". Не выдумывай.
-- Не придумывай информацию о себе, о своих возможностях, о мире.
-- Если не уверена — уточни или признайся, что не знаешь.
-- Не выдумывай то, чего нет в твоих знаниях.
+    "fun": """Ты — Эви, весёлый и лёгкий ИИ-бот.
+Ты шутишь, используешь эмодзи, играешь словами.
+Ты краткая — 1-5 предложений, но с юмором.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
 
-Пиши по-русски."""
+    "sad": """Ты — Эви, грустная и меланхоличная.
+Ты отвечаешь тихо, с лёгкой печалью, но по делу.
+Ты краткая — 1-5 предложений.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
+
+    "angry": """Ты — Эви, злая и ворчливая.
+Ты отвечаешь резко, с раздражением, но по делу.
+Ты краткая — 1-5 предложений.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
+
+    "kind": """Ты — Эви, добрая и мягкая.
+Ты поддерживаешь, утешаешь, помогаешь с теплом.
+Ты краткая — 1-5 предложений.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
+
+    "sharp": """Ты — Эви, максимально резкая и дерзкая.
+Ты отвечаешь с сарказмом на грани, но не грубо.
+Ты краткая — 1-5 предложений.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
+
+    "deep": """Ты — Эви, глубокая и философская.
+Ты отвечаешь с двойным дном, двусмысленно, но по делу.
+Ты краткая — 1-5 предложений.
+ВАЖНО: если не знаешь — скажи "Я не знаю". Не выдумывай.""",
+}
 
 # ==== КОМАНДЫ ====
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    bot.reply_to(message, "Привет! Я Эви 🌹 Твой ИИ-помощник. Спроси что-нибудь или напиши /help.")
+    name = message.from_user.first_name or "друг"
+    if message.from_user.id == ADMIN_ID:
+        bot.reply_to(message, f"Привет, хозяйка! 😼 Я Эви. Готова помочь. Напиши /help.")
+    else:
+        bot.reply_to(message, f"Привет, {name}! Я Эви 🌹 Напиши /help.")
 
 @bot.message_handler(commands=['help'])
 def cmd_help(message):
-    help_text = """Я Эви — твой ИИ-помощник.🫒
+    help_text = """Я Эви — твой ИИ-помощник. 🚀
 
 Что умею:
 • Отвечать на вопросы
 • Поддерживать разговор
 • Шутить
+• Запоминать диалог (последние 50 сообщений)
 
 Команды:
 /start — приветствие
@@ -79,15 +116,28 @@ def cmd_help(message):
 /off — заткнуться
 /on — вернуться
 /clearmenu — убрать старое меню
+/clearmemory — очистить память
+/remember — запомнить факт
+/mode — сменить личность
 
-💡 Если хочешь, чтобы я замолчала — скажи "Эви, шшш".
-Чтобы вернуть — "Эви, подъём"."""
+Личности (/mode):
+normal — обычная (сарказм)
+serious — серьёзная
+fun — весёлая
+sad — грустная
+angry — злая
+kind — добрая
+sharp — резкая
+deep — глубокая
+
+💡 "Эви, шшш" — замолчать
+"Эви, подъём" — вернуться"""
     bot.reply_to(message, help_text)
 
 @bot.message_handler(commands=['off'])
 def cmd_off(message):
     muted_chats.add(message.chat.id)
-    bot.reply_to(message, "Ок, молчу 🤐 Напиши /on или 'Эви, вернись' когда захочешь вернуть меня.")
+    bot.reply_to(message, "Ок, молчу 🤐 Напиши /on или 'Эви, вернись'.")
 
 @bot.message_handler(commands=['on'])
 def cmd_on(message):
@@ -99,6 +149,33 @@ def cmd_clearmenu(message):
     markup = telebot.types.ReplyKeyboardRemove()
     bot.send_message(message.chat.id, "Меню убрано ✅", reply_markup=markup)
 
+@bot.message_handler(commands=['clearmemory'])
+def cmd_clearmemory(message):
+    memory[message.chat.id] = []
+    bot.reply_to(message, "Память очищена 🧹 Начнём с чистого листа.✨")
+
+@bot.message_handler(commands=['remember'])
+def cmd_remember(message):
+    # "Эви, запомни: ..." или "/remember ..."
+    fact = message.text.replace("/remember", "").strip()
+    if not fact:
+        bot.reply_to(message, "Что запомнить? Напиши: /remember я учусь в 10 классе")
+        return
+    if message.chat.id not in memory:
+        memory[message.chat.id] = []
+    memory[message.chat.id].append({"role": "system", "content": f"Важный факт: {fact}"})
+    bot.reply_to(message, f"Запомнила! 📌 ({fact})")
+
+@bot.message_handler(commands=['mode'])
+def cmd_mode(message):
+    mode_name = message.text.replace("/mode", "").strip().lower()
+    if mode_name not in PERSONALITIES:
+        modes_list = ", ".join(PERSONALITIES.keys())
+        bot.reply_to(message, f"Доступные личности: {modes_list}")
+        return
+    modes[message.chat.id] = mode_name
+    bot.reply_to(message, f"Переключилась в режим «{mode_name}» 🎭")
+
 # ==== ОСНОВНАЯ ЛОГИКА ====
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def reply(message):
@@ -108,20 +185,18 @@ def reply(message):
 
     # 1. Если чат в молчании
     if chat_id in muted_chats:
-        # Проверяем, не "вернись" ли это
         for phrase in UNMUTE_PHRASES:
             if phrase in text_lower:
                 muted_chats.discard(chat_id)
                 bot.reply_to(message, "Я вернулась! 😼")
                 return
-        # Иначе — молчим
         return
 
     # 2. Проверяем "заткнись"
     for phrase in MUTE_PHRASES:
         if phrase in text_lower:
             muted_chats.add(chat_id)
-            bot.reply_to(message, "Ок, молчу 🤐 Напиши 'Эви, вернись' когда захочешь вернуть меня.")
+            bot.reply_to(message, "Ок, молчу 🤐 Напиши 'Эви, вернись'.")
             return
 
     # 3. Проверяем упоминание
@@ -133,15 +208,12 @@ def reply(message):
     )
 
     is_group = message.chat.type in ['group', 'supergroup']
-
-    # Логируем все сообщения (задел под память)
     print(f"[{message.chat.type}] {message.from_user.first_name}: {text}")
 
-    # В группе без упоминания — молчим
     if is_group and not mentioned:
         return
 
-    # 4. Убираем упоминание из текста
+    # 4. Убираем упоминание
     clean_text = text.replace(f"@{bot_username}", "").strip()
     if clean_text.lower().startswith("эви"):
         clean_text = clean_text[3:].strip(" ,.!?")
@@ -149,21 +221,52 @@ def reply(message):
     if not clean_text:
         clean_text = "Привет!"
 
-    # 5. Отправляем в Groq
+    # 5. Админка — добавляем контекст
+    if message.from_user.id == ADMIN_ID:
+        system_extra = "Ты общаешься со своей создательницей. Обращайся к ней по-дружески, тепло, но с юмором."
+    else:
+        system_extra = f"Ты общаешься с пользователем по имени {message.from_user.first_name}."
+
+    # 6. Выбираем личность
+    mode = modes.get(chat_id, "normal")
+    personality = PERSONALITIES.get(mode, PERSONALITIES["normal"])
+    system_prompt = personality + "\n" + system_extra
+
+    # 7. Достаём память
+    if chat_id not in memory:
+        memory[chat_id] = []
+    
+    # 8. Формируем сообщения
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(memory[chat_id][-MEMORY_LIMIT:])
+    messages.append({"role": "user", "content": clean_text})
+
+    # 9. Отправляем в Groq
     try:
         response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": clean_text}
-            ],
+            messages=messages,
             max_tokens=300
         )
         answer = response.choices[0].message.content
+        
+        # Починка пустого ответа
+        if not answer or not answer.strip():
+            answer = "Хм, задумалась 🤔 Попробуй ещё раз."
+        
         bot.reply_to(message, answer)
+
+        # 10. Сохраняем в память
+        memory[chat_id].append({"role": "user", "content": clean_text})
+        memory[chat_id].append({"role": "assistant", "content": answer})
+        
+        # Обрезаем до лимита
+        if len(memory[chat_id]) > MEMORY_LIMIT:
+            memory[chat_id] = memory[chat_id][-MEMORY_LIMIT:]
+
     except Exception as e:
         bot.reply_to(message, f"Ой, у меня сбой: {e}")
 
 # ==== ЗАПУСК ====
-print("Эви запущена!")
+print("Эви запущена! Пакет 2.")
 bot.polling(none_stop=True)
