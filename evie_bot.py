@@ -3,7 +3,6 @@ from openai import OpenAI
 import os
 import psycopg2
 from psycopg2 import pool
-import time
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -18,7 +17,7 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# ==== ПОДКЛЮЧЕНИЕ К БД ====
+# ==== БД ====
 try:
     db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
 except Exception as e:
@@ -128,6 +127,19 @@ def get_memory(chat_id, limit=50):
     except Exception as e:
         print(f"Ошибка get_memory: {e}")
         return []
+    finally:
+        release_conn(conn)
+
+def clear_memory(chat_id):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM messages WHERE chat_id = %s", (chat_id,))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка clear_memory: {e}")
     finally:
         release_conn(conn)
 
@@ -320,18 +332,19 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Не переигрывай характер, не льсти, не называй пользователя «создателем» каждый раз.
 Естественность — как живой человек.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
-Формулы — Unicode (², √, π), без LaTeX.
+Формулы пиши БЕЗ LaTeX. Не используй: \(, \), \frac, \sqrt, \gamma, \begin, \end, ^{}, _{}.
+Пиши простым текстом.
 В обычном разговоре — кратко (1–5 предложений).
 В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине."""
 
-ADMIN_EXTRA = "Ты общаешься с хозяйкой. Она — твой создатель, но не подчёркивай это каждый раз. Обращайся как с близким человеком, без показухи."
+ADMIN_EXTRA = "Ты общаешься со своей создательницей. Она — твой создатель, но не подчёркивай это каждый раз."
 
 PERSONALITIES = {
     "normal": "Характер: дерзкая, с сарказмом, с юмором.",
     "serious": "Характер: серьёзная, чёткая, без шуток. Помогаешь с учёбой и работой.",
     "fun": "Характер: весёлая, шутливая, лёгкая.",
     "sad": "Характер: грустная, меланхоличная.",
-    "angry": "Характер: резкая, ворчливая.",
+    "angry": "Характер: ты недовольна, отвечаешь резко, с раздражением, но не грубо. Можешь ворчать, язвить.",
     "kind": "Характер: добрая, мягкая, поддерживающая.",
     "sharp": "Характер: максимально резкая, дерзкая, сарказм на грани.",
     "deep": "Характер: глубокая, философская, с двойным дном.",
@@ -362,7 +375,7 @@ HOMEWORK_PROMPT = """
 - Учитываешь уровень (класс, предмет).
 - Проверяешь ответ.
 - Если непонятно — спроси, не выдумывай.
-- Формулы — Unicode."""
+- Формулы — простым текстом, без LaTeX."""
 
 RP_PROMPT = """
 Ты в режиме РП.
@@ -381,8 +394,55 @@ RP_PROMPT = """
 ПЕРСОНАЖ:
 - Если игрок задал анкету — отыгрываешь его персонажа.
 - Если нет — генерируешь простого и сохраняешь.
-- Игрок может сменить персонажа (/rp clear_bot).
+- Игрок может сменить персонажа (/rp_clear_bot).
+
+АНКЕТА (можно заполнять не все пункты):
+Описание:
+Вид/раса:
+Пол:
+Имя:
+Возраст/д.р.:
+Вес:
+Рост:
+Сила:
+Скорость:
+Скрытность:
+Стойкость/Выносливость:
+Характер:
+Увлечения/Хобби:
+Умения:
+Любит:
+Страхи:
+Слабости:
+Снаряжение:
+Оружие:
+Способности:
 """
+
+RP_ANKETA_TEMPLATE = """🎭 Пример анкеты для РП (можно заполнять не все пункты):
+
+Описание:
+Вид/раса:
+Пол:
+Имя:
+Возраст/д.р.:
+Вес:
+Рост:
+Сила:
+Скорость:
+Скрытность:
+Стойкость/Выносливость:
+Характер:
+Увлечения/Хобби:
+Умения:
+Любит:
+Страхи:
+Слабости:
+Снаряжение:
+Оружие:
+Способности:
+
+Отправь заполненную анкету одним сообщением."""
 
 # ==== КОМАНДЫ ====
 @bot.message_handler(commands=['start'])
@@ -408,34 +468,35 @@ def cmd_help(message):
 • Помогать с домашкой
 • Вести РП
 
-Команды:
-Общие:
+Общие команды:
 /start — приветствие
 /help — эта справка
-/off — заткнуться
-/on — вернуться
+/off — заткнуться (можно словосочетаниями)
+/on — вернуться (можно словосочетаниями)
 /remember — запомнить факт
-/mode — сменить личность
 
 РП режим:
-/rp on — включить РП
-/rp off — выключить РП
+/rp_on — включить РП
+/rp_off — выключить РП
+/rp_reset — сбросить сессию РП (историю диалога)
 
-Личности (/mode):
-normal — обычная (сарказм)
-serious — серьёзная
-fun — весёлая
-sad — грустная
-angry — злая
-kind — добрая
-sharp — резкая
-deep — глубокая
+Личности (/mode_...):
+/mode_normal — обычная (сарказм, юмор)
+/mode_serious — серьёзная (чётко, по делу, для учёбы)
+/mode_fun — весёлая (шутки, лёгкость)
+/mode_sad — грустная (меланхолия, тихая)
+/mode_angry — злая (резкая, ворчливая)
+/mode_kind — добрая (тепло, поддержка)
+/mode_sharp — резкая (дерзкая, сарказм на грани)
+/mode_deep — глубокая (философия, двойное дно)
 
 💡 "Эви, шшш" — замолчать
 "Эви, подъём" — вернуться
+(Можно подбирать разные словосочетания словами. Эти фразы и команды разработаны для группы)
 
 📌 Важное:
 • Можно попросить без команд: перевести, объяснить, проанализировать, сделать дз.
+• Можно добавлять в группы.
 • Я могу ошибаться (галлюцинировать). Дз — не всегда точно.
 • История сохраняется для улучшения качества Эви."""
     bot.reply_to(message, help_text)
@@ -445,16 +506,16 @@ deep — глубокая
 
 Пользователи:
 /users — список пользователей
-/user [id] — инфо о пользователе
-/userhistory [id] — переписка с пользователем
+/user_ID — инфо о пользователе (пример: /user_6638227198)
+/userhistory_ID — переписка с пользователем
 /stats — статистика
 /broadcast [текст] — рассылка
 
 Whitelist:
-/whitelist on — включить
-/whitelist off — выключить
-/allow [id] — добавить
-/deny [id] — убрать"""
+/whitelist_on — включить
+/whitelist_off — выключить
+/allow_ID — добавить
+/deny_ID — убрать"""
         bot.send_message(message.chat.id, admin_help)
 
 @bot.message_handler(commands=['off'])
@@ -476,47 +537,59 @@ def cmd_remember(message):
     save_message(message.from_user.id, message.chat.id, f"Важный факт: {fact}", "system")
     bot.reply_to(message, f"Запомнила! 📌 ({fact})")
 
-@bot.message_handler(commands=['mode'])
+# ==== РЕЖИМЫ ====
+@bot.message_handler(commands=['mode_normal', 'mode_serious', 'mode_fun', 'mode_sad', 'mode_angry', 'mode_kind', 'mode_sharp', 'mode_deep'])
 def cmd_mode(message):
-    mode_name = message.text.replace("/mode", "").strip().lower()
+    mode_name = message.text.replace("/mode_", "").strip().lower()
     if mode_name not in PERSONALITIES:
-        modes_list = ", ".join(PERSONALITIES.keys())
-        bot.reply_to(message, f"Доступные личности: {modes_list}")
+        bot.reply_to(message, f"Доступные личности: {', '.join(PERSONALITIES.keys())}")
         return
     modes[message.chat.id] = mode_name
     bot.reply_to(message, f"Переключилась в режим «{mode_name}» 🎭")
 
 # ==== РП ====
-@bot.message_handler(commands=['rp'])
-def cmd_rp(message):
-    args = message.text.replace("/rp", "").strip()
-    args_lower = args.lower()
+@bot.message_handler(commands=['rp_on'])
+def cmd_rp_on(message):
+    rp_mode.add(message.chat.id)
+    bot.reply_to(message, "🎭 Режим РП активирован.\n\nПравила:\n//...// — вне РП\n*...* — действия\n💭...💭 — мысли\n(...) — уточнения\n\nКоманды:\n/rp_off — выйти\n/rp_reset — сбросить сессию\n/rp_set_bot — анкета Эви\n/rp_clear_bot — очистить\n/rp_set_me — своя анкета\n/rp_clear_me — очистить\n/rp_info — показать анкеты")
+    bot.send_message(message.chat.id, RP_ANKETA_TEMPLATE)
 
-    if args_lower == "on":
-        rp_mode.add(message.chat.id)
-        bot.reply_to(message, "🎭 Режим РП активирован.\n\nПравила:\n//...// — вне РП\n*...* — действия\n💭...💭 — мысли\n(...) — уточнения\n\nКоманды:\n/rp off — выйти\n/rp set_bot — анкета Эви\n/rp clear_bot — очистить\n/rp set_me — своя анкета\n/rp clear_me — очистить\n/rp info — показать анкеты")
-    elif args_lower == "off":
-        rp_mode.discard(message.chat.id)
-        bot.reply_to(message, "Режим РП выключен.")
-    elif args_lower == "set_bot":
-        bot.reply_to(message, "Напиши анкету Эви. Отправь текст в одном сообщении.")
-        bot.register_next_step_handler(message, save_bot_anketa)
-    elif args_lower == "clear_bot":
-        clear_anketa(ADMIN_ID, is_bot=True)
-        bot.reply_to(message, "Анкета Эви очищена.")
-    elif args_lower == "set_me":
-        bot.reply_to(message, "Напиши свою анкету. Отправь текст в одном сообщении.")
-        bot.register_next_step_handler(message, save_me_anketa)
-    elif args_lower == "clear_me":
-        clear_anketa(message.from_user.id, is_bot=False)
-        bot.reply_to(message, "Твоя анкета очищена.")
-    elif args_lower == "info":
-        bot_anketa = get_anketa(ADMIN_ID, is_bot=True)
-        user_anketa = get_anketa(message.from_user.id, is_bot=False)
-        text = f"📋 Анкета Эви:\n{bot_anketa or '(не задана)'}\n\n📋 Твоя анкета:\n{user_anketa or '(не задана)'}"
-        bot.reply_to(message, text)
-    else:
-        bot.reply_to(message, "Используй: /rp on, /rp off, /rp set_bot, /rp clear_bot, /rp set_me, /rp clear_me, /rp info")
+@bot.message_handler(commands=['rp_off'])
+def cmd_rp_off(message):
+    rp_mode.discard(message.chat.id)
+    bot.reply_to(message, "Режим РП выключен.")
+
+@bot.message_handler(commands=['rp_reset'])
+def cmd_rp_reset(message):
+    clear_memory(message.chat.id)
+    bot.reply_to(message, "РП сессия сброшена 🎭 Начнём заново. Анкеты сохранены.")
+
+@bot.message_handler(commands=['rp_set_bot'])
+def cmd_rp_set_bot(message):
+    bot.reply_to(message, "Напиши анкету Эви. Отправь текст в одном сообщении.")
+    bot.register_next_step_handler(message, save_bot_anketa)
+
+@bot.message_handler(commands=['rp_clear_bot'])
+def cmd_rp_clear_bot(message):
+    clear_anketa(ADMIN_ID, is_bot=True)
+    bot.reply_to(message, "Анкета Эви очищена.")
+
+@bot.message_handler(commands=['rp_set_me'])
+def cmd_rp_set_me(message):
+    bot.reply_to(message, "Напиши свою анкету. Отправь текст в одном сообщении.")
+    bot.register_next_step_handler(message, save_me_anketa)
+
+@bot.message_handler(commands=['rp_clear_me'])
+def cmd_rp_clear_me(message):
+    clear_anketa(message.from_user.id, is_bot=False)
+    bot.reply_to(message, "Твоя анкета очищена.")
+
+@bot.message_handler(commands=['rp_info'])
+def cmd_rp_info(message):
+    bot_anketa = get_anketa(ADMIN_ID, is_bot=True)
+    user_anketa = get_anketa(message.from_user.id, is_bot=False)
+    text = f"📋 Анкета Эви:\n{bot_anketa or '(не задана)'}\n\n📋 Твоя анкета:\n{user_anketa or '(не задана)'}"
+    bot.reply_to(message, text)
 
 def save_bot_anketa(message):
     save_anketa(ADMIN_ID, message.text, is_bot=True)
@@ -540,40 +613,39 @@ def cmd_users(message):
         text += f"ID: {u[0]}\nИмя: {u[1]}\n@{u[2] or '—'}\nСообщений: {u[3]}\n\n"
     bot.reply_to(message, text)
 
-@bot.message_handler(commands=['user'])
-def cmd_user(message):
+@bot.message_handler(commands=['user_', 'userhistory_', 'allow_', 'deny_'])
+def cmd_admin_with_id(message):
     if message.from_user.id != ADMIN_ID:
         return
+    cmd = message.text.split('_')[0].replace('/', '')
     try:
-        uid = int(message.text.replace("/user", "").strip())
+        uid = int(message.text.split('_')[1].strip())
     except:
-        bot.reply_to(message, "Используй: /user [id]")
+        bot.reply_to(message, "Используй: /user_ID, /userhistory_ID, /allow_ID, /deny_ID")
         return
-    info = get_user_info(uid)
-    if not info:
-        bot.reply_to(message, "Пользователь не найден.")
-        return
-    text = f"📊 Пользователь:\nID: {info[0]}\nИмя: {info[1]}\n@{info[2] or '—'}\nПервый раз: {info[3]}\nПоследний раз: {info[4]}\nСообщений: {info[5]}\nРоль: {info[6]}"
-    bot.reply_to(message, text)
-
-@bot.message_handler(commands=['userhistory'])
-def cmd_userhistory(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        uid = int(message.text.replace("/userhistory", "").strip())
-    except:
-        bot.reply_to(message, "Используй: /userhistory [id]")
-        return
-    history = get_user_history(uid, 50)
-    if not history:
-        bot.reply_to(message, "История пуста.")
-        return
-    text = f"📝 Переписка с {uid}:\n\n"
-    for h in history:
-        role = "👤" if h[1] == "user" else "🤖"
-        text += f"{role} {h[0][:100]}\n\n"
-    bot.reply_to(message, text[:4000])
+    if cmd == 'user':
+        info = get_user_info(uid)
+        if not info:
+            bot.reply_to(message, "Пользователь не найден.")
+            return
+        text = f"📊 Пользователь:\nID: {info[0]}\nИмя: {info[1]}\n@{info[2] or '—'}\nПервый раз: {info[3]}\nПоследний раз: {info[4]}\nСообщений: {info[5]}\nРоль: {info[6]}"
+        bot.reply_to(message, text)
+    elif cmd == 'userhistory':
+        history = get_user_history(uid, 50)
+        if not history:
+            bot.reply_to(message, "История пуста.")
+            return
+        text = f"📝 Переписка с {uid}:\n\n"
+        for h in history:
+            role = "👤" if h[1] == "user" else "🤖"
+            text += f"{role} {h[0][:100]}\n\n"
+        bot.reply_to(message, text[:4000])
+    elif cmd == 'allow':
+        add_whitelist(uid)
+        bot.reply_to(message, f"Пользователь {uid} добавлен в whitelist.")
+    elif cmd == 'deny':
+        remove_whitelist(uid)
+        bot.reply_to(message, f"Пользователь {uid} убран из whitelist.")
 
 @bot.message_handler(commands=['stats'])
 def cmd_stats(message):
@@ -603,43 +675,19 @@ def cmd_broadcast(message):
             pass
     bot.reply_to(message, f"Рассылка отправлена {count} пользователям.")
 
-@bot.message_handler(commands=['whitelist'])
-def cmd_whitelist(message):
+@bot.message_handler(commands=['whitelist_on'])
+def cmd_whitelist_on(message):
     if message.from_user.id != ADMIN_ID:
         return
-    arg = message.text.replace("/whitelist", "").strip().lower()
-    if arg == "on":
-        set_whitelist_on('1')
-        bot.reply_to(message, "Whitelist включён. Только разрешённые могут писать.")
-    elif arg == "off":
-        set_whitelist_on('0')
-        bot.reply_to(message, "Whitelist выключен. Все могут писать.")
-    else:
-        bot.reply_to(message, "Используй: /whitelist on или /whitelist off")
+    set_whitelist_on('1')
+    bot.reply_to(message, "Whitelist включён. Только разрешённые могут писать.")
 
-@bot.message_handler(commands=['allow'])
-def cmd_allow(message):
+@bot.message_handler(commands=['whitelist_off'])
+def cmd_whitelist_off(message):
     if message.from_user.id != ADMIN_ID:
         return
-    try:
-        uid = int(message.text.replace("/allow", "").strip())
-    except:
-        bot.reply_to(message, "Используй: /allow [id]")
-        return
-    add_whitelist(uid)
-    bot.reply_to(message, f"Пользователь {uid} добавлен в whitelist.")
-
-@bot.message_handler(commands=['deny'])
-def cmd_deny(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        uid = int(message.text.replace("/deny", "").strip())
-    except:
-        bot.reply_to(message, "Используй: /deny [id]")
-        return
-    remove_whitelist(uid)
-    bot.reply_to(message, f"Пользователь {uid} убран из whitelist.")
+    set_whitelist_on('0')
+    bot.reply_to(message, "Whitelist выключен. Все могут писать.")
 
 # ==== ОСНОВНАЯ ЛОГИКА ====
 @bot.message_handler(func=lambda m: True, content_types=['text'])
@@ -731,5 +779,5 @@ def reply(message):
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.")
+print("Эви запущена! Пакет 3 + полировка.")
 bot.polling(none_stop=True)
