@@ -516,31 +516,45 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-# ==== РЕНДЕР ====
-def extract_latex(text):
+# ==== РЕНДЕР (v2) ====
+def extract_latex_blocks(text):
     patterns = [
-        r'\\\[(.*?)\\\]',
-        r'\\\((.*?)\\\)',
-        r'\\begin\{.*?\}(.*?)\\end\{.*?\}'
+        (r'\\\[(.*?)\\\]', True),
+        (r'\\\((.*?)\\\)', True),
+        (r'\\begin\{aligned\}(.*?)\\end\{aligned\}', True),
+        (r'\\begin\{matrix\}(.*?)\\end\{matrix\}', True),
+        (r'\\begin\{pmatrix\}(.*?)\\end\{pmatrix\}', True),
     ]
     found = []
-    for p in patterns:
-        found.extend(re.findall(p, text, re.DOTALL))
+    for p, _ in patterns:
+        for m in re.findall(p, text, re.DOTALL):
+            clean = m.strip()
+            if clean and len(clean) > 3:
+                found.append(clean)
     return found
 
 def clean_latex_from_text(text):
     patterns = [
         r'\\\[.*?\\\]',
         r'\\\(.*?\\\)',
-        r'\\begin\{.*?\}.*?\\end\{.*?\}'
+        r'\\begin\{aligned\}.*?\\end\{aligned\}',
+        r'\\begin\{matrix\}.*?\\end\{matrix\}',
+        r'\\begin\{pmatrix\}.*?\\end\{pmatrix\}',
     ]
     for p in patterns:
         text = re.sub(p, '', text, flags=re.DOTALL)
     return text.strip()
 
+def has_cyrillic(text):
+    return bool(re.search('[а-яА-ЯёЁ]', text))
+
 def render_formula(latex_str):
     try:
+        if has_cyrillic(latex_str):
+            return None
         clean = latex_str.strip()
+        clean = clean.replace('&', ' ')
+        clean = re.sub(r'\\\\', ' ', clean)
         expr = sp.sympify(clean)
         fig, ax = plt.subplots(figsize=(6, 2))
         ax.text(0.5, 0.5, f"${sp.latex(expr)}$", fontsize=20, ha='center', va='center')
@@ -568,7 +582,8 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Естественность — как живой человек.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
 В обычном разговоре — кратко (1–5 предложений).
-В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине."""
+В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине.
+Формулы пиши в LaTeX: \\(...\\) для строчных, \\[...\\] для блочных. Без текста внутри формул."""
 
 ADMIN_EXTRA = "Ты общаешься со своей создательницей. Она — твой создатель, но не подчёркивай это каждый раз."
 
@@ -1041,17 +1056,22 @@ def reply(message):
         if not answer or not answer.strip():
             answer = "Хм, задумалась 🤔 Попробуй ещё раз."
 
-        latex_parts = extract_latex(answer)
-        if latex_parts:
-            clean_text_answer = clean_latex_from_text(answer)
-            if clean_text_answer:
-                bot.reply_to(message, clean_text_answer)
-            for part in latex_parts:
-                img = render_formula(part)
+        latex_blocks = extract_latex_blocks(answer)
+        if latex_blocks:
+            clean_answer = clean_latex_from_text(answer)
+            if clean_answer:
+                bot.reply_to(message, clean_answer)
+            
+            rendered_count = 0
+            for block in latex_blocks:
+                if rendered_count >= 5:
+                    break
+                img = render_formula(block)
                 if img:
                     bot.send_photo(chat_id, img)
+                    rendered_count += 1
                 else:
-                    bot.reply_to(message, f"`{part}`")
+                    bot.reply_to(message, f"`{block}`")
         else:
             bot.reply_to(message, answer)
 
@@ -1069,5 +1089,5 @@ def reply(message):
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.2 + рендер.")
+print("Эви запущена! Пакет 3.2 (рендер v2).")
 bot.polling(none_stop=True)
