@@ -605,42 +605,34 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-# ==== РЕНДЕР ====
-LATEX_MARKERS = ['\\frac', '\\sqrt', '\\mathbb', '\\dots', '\\quad', '\\begin', '\\end', '\\left', '\\right', '\\cdot', '\\times', '\\div', '\\pm', '\\mp', '\\leq', '\\geq', '\\neq', '\\approx', '\\infty', '\\sum', '\\int', '\\lim', '\\log', '\\ln', '\\sin', '\\cos', '\\tan', '^{', '_{', '\\boxed', '\\alpha', '\\beta', '\\gamma', '\\delta', '\\lambda', '\\mu', '\\pi', '\\sigma', '\\omega', '\\theta', '\\phi', '\\psi', '\\Delta', '\\Omega', '\\Sigma', '\\Pi', '\\parallel', '\\perp', '\\angle', '\\triangle']
-
-def has_latex_markers(line):
-    return any(m in line for m in LATEX_MARKERS)
-
+# ==== РЕНДЕР (v4) ====
 def has_cyrillic(text):
     return bool(re.search('[а-яА-ЯёЁ]', text))
 
 def extract_latex_blocks(text):
     blocks = []
-    current = []
-    for line in text.split('\n'):
-        stripped = line.strip()
-        if has_latex_markers(stripped) and not has_cyrillic(stripped):
-            current.append(stripped)
-        else:
-            if current:
-                block = ' '.join(current)
-                if 3 < len(block) < 500:
-                    blocks.append(block)
-                current = []
-    if current:
-        block = ' '.join(current)
-        if 3 < len(block) < 500:
-            blocks.append(block)
+    patterns = [
+        r'\\\((.*?)\\\)',
+        r'\\\[(.*?)\\\]',
+    ]
+    for p in patterns:
+        for m in re.findall(p, text, re.DOTALL):
+            clean = m.strip()
+            clean = re.sub(r'\\\\', ' ', clean)
+            clean = clean.replace('&', ' ')
+            clean = clean.strip()
+            if clean and not has_cyrillic(clean) and 3 < len(clean) < 500:
+                blocks.append(clean)
     return blocks
 
 def clean_latex_from_text(text):
-    lines = text.split('\n')
-    clean_lines = []
-    for line in lines:
-        if has_latex_markers(line) and not has_cyrillic(line):
-            continue
-        clean_lines.append(line)
-    return '\n'.join(clean_lines).strip()
+    patterns = [
+        r'\\\(.*?\\\)',
+        r'\\\[.*?\\\]',
+    ]
+    for p in patterns:
+        text = re.sub(p, '', text, flags=re.DOTALL)
+    return text.strip()
 
 def render_formula(latex_str):
     try:
@@ -685,7 +677,8 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Естественность — как живой человек.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
 В обычном разговоре — кратко (1–5 предложений).
-В задачах (анализ, объяснение, РП) — без ограничений по длине."""
+В задачах (анализ, объяснение, РП) — без ограничений по длине.
+Формулы пиши в LaTeX: \\(...\\) для строчных."""
 
 ADMIN_EXTRA = "Ты общаешься со своей создательницей. Она — твой создатель, но не подчёркивай это каждый раз."
 
@@ -1187,5 +1180,5 @@ def reply(message):
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.2 (сжатие + без дз).")
+print("Эви запущена! Пакет 3.2 (рендер v4).")
 bot.polling(none_stop=True)
