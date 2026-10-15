@@ -23,6 +23,11 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
+# ==== ПАРАМЕТРЫ ПАМЯТИ ====
+MEMORY_LIMIT = 30
+COMPRESS_THRESHOLD = 500
+SUMMARIZE_EVERY = 30
+
 # ==== БД ====
 try:
     db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
@@ -63,6 +68,14 @@ def init_db():
                 chat_id BIGINT,
                 text TEXT,
                 role TEXT,
+                time TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS summaries (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                summary TEXT,
                 time TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -147,7 +160,7 @@ def save_message(user_id, chat_id, text, role):
     finally:
         release_conn(conn)
 
-def get_memory(chat_id, limit=50):
+def get_memory(chat_id, limit=MEMORY_LIMIT):
     conn = get_conn()
     if not conn:
         return []
@@ -163,6 +176,20 @@ def get_memory(chat_id, limit=50):
     finally:
         release_conn(conn)
 
+def get_messages_count(chat_id):
+    conn = get_conn()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id = %s", (chat_id,))
+        return cur.fetchone()[0]
+    except Exception as e:
+        print(f"Ошибка get_messages_count: {e}")
+        return 0
+    finally:
+        release_conn(conn)
+
 def clear_memory(chat_id):
     conn = get_conn()
     if not conn:
@@ -170,9 +197,71 @@ def clear_memory(chat_id):
     try:
         cur = conn.cursor()
         cur.execute("DELETE FROM messages WHERE chat_id = %s", (chat_id,))
+        cur.execute("DELETE FROM summaries WHERE chat_id = %s", (chat_id,))
         conn.commit()
     except Exception as e:
         print(f"Ошибка clear_memory: {e}")
+    finally:
+        release_conn(conn)
+
+def compress_long_message(text):
+    if len(text) <= COMPRESS_THRESHOLD:
+        return text
+    try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {"role": "system", "content": "Сожми текст в 2-3 предложения, сохрани главное. Без LaTeX."},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=200
+        )
+        compressed = response.choices[0].message.content
+        return compressed if compressed else text[:COMPRESS_THRESHOLD]
+    except Exception as e:
+        print(f"Ошибка сжатия: {e}")
+        return text[:COMPRESS_THRESHOLD]
+
+def summarize_old_messages(chat_id):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT text, role FROM messages WHERE chat_id = %s ORDER BY id ASC LIMIT %s", (chat_id, SUMMARIZE_EVERY))
+        rows = cur.fetchall()
+        if not rows:
+            return
+        dialog = "\n".join([f"{r[1]}: {r[0]}" for r in rows])
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {"role": "system", "content": "Сожми диалог в 5 предложений. Сохрани главное: темы, факты, договорённости. Без LaTeX."},
+                {"role": "user", "content": dialog}
+            ],
+            max_tokens=300
+        )
+        summary = response.choices[0].message.content
+        if summary:
+            cur.execute("INSERT INTO summaries (chat_id, summary) VALUES (%s, %s)", (chat_id, summary))
+            cur.execute("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE chat_id = %s ORDER BY id ASC LIMIT %s)", (chat_id, SUMMARIZE_EVERY))
+            conn.commit()
+    except Exception as e:
+        print(f"Ошибка summarize: {e}")
+    finally:
+        release_conn(conn)
+
+def get_summaries(chat_id, limit=3):
+    conn = get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT summary FROM summaries WHERE chat_id = %s ORDER BY id DESC LIMIT %s", (chat_id, limit))
+        return [r[0] for r in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка get_summaries: {e}")
+        return []
     finally:
         release_conn(conn)
 
@@ -324,7 +413,7 @@ def save_rp_message(session_id, text, role):
     finally:
         release_conn(conn)
 
-def get_rp_memory(session_id, limit=50):
+def get_rp_memory(session_id, limit=MEMORY_LIMIT):
     conn = get_conn()
     if not conn:
         return []
@@ -516,7 +605,7 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-# ==== РЕНДЕР (v3) ====
+# ==== РЕНДЕР ====
 LATEX_MARKERS = ['\\frac', '\\sqrt', '\\mathbb', '\\dots', '\\quad', '\\begin', '\\end', '\\left', '\\right', '\\cdot', '\\times', '\\div', '\\pm', '\\mp', '\\leq', '\\geq', '\\neq', '\\approx', '\\infty', '\\sum', '\\int', '\\lim', '\\log', '\\ln', '\\sin', '\\cos', '\\tan', '^{', '_{', '\\boxed', '\\alpha', '\\beta', '\\gamma', '\\delta', '\\lambda', '\\mu', '\\pi', '\\sigma', '\\omega', '\\theta', '\\phi', '\\psi', '\\Delta', '\\Omega', '\\Sigma', '\\Pi', '\\parallel', '\\perp', '\\angle', '\\triangle']
 
 def has_latex_markers(line):
@@ -596,13 +685,13 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Естественность — как живой человек.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
 В обычном разговоре — кратко (1–5 предложений).
-В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине."""
+В задачах (анализ, объяснение, РП) — без ограничений по длине."""
 
 ADMIN_EXTRA = "Ты общаешься со своей создательницей. Она — твой создатель, но не подчёркивай это каждый раз."
 
 PERSONALITIES = {
     "normal": "Характер: дерзкая, с сарказмом, с юмором.",
-    "serious": "Характер: серьёзная, чёткая, без шуток. Помогаешь с учёбой и работой.",
+    "serious": "Характер: серьёзная, чёткая, без шуток.",
     "fun": "Характер: весёлая, шутливая, лёгкая.",
     "sad": "Характер: грустная, меланхоличная.",
     "angry": "Характер: ты недовольна, отвечаешь резко, с раздражением, но не грубо. Можешь ворчать, язвить.",
@@ -626,14 +715,6 @@ EXPLAIN_PROMPT = """
 - Подстраивайся под уровень.
 - Если не понял — другой пример.
 - В конце спроси, понятно ли."""
-
-HOMEWORK_PROMPT = """
-Когда просят решить дз:
-- Пошагово, не прыгая через шаги.
-- Сначала принцип, потом решение.
-- Учитываешь уровень.
-- Проверяешь ответ.
-- Если непонятно — спроси."""
 
 RP_PROMPT = """
 Ты в режиме РП.
@@ -699,7 +780,6 @@ def cmd_help(message):
 • Переводить
 • Объяснять
 • Анализировать
-• Помогать с домашкой
 • Вести РП
 • Рисовать формулы
 
@@ -716,7 +796,7 @@ def cmd_help(message):
 
 Личности (/mode_...):
 /mode_normal — обычная (сарказм, юмор)
-/mode_serious — серьёзная (для учёбы)
+/mode_serious — серьёзная
 /mode_fun — весёлая (шутки)
 /mode_sad — грустная (меланхолия)
 /mode_angry — злая (резкая, ворчливая)
@@ -728,8 +808,8 @@ def cmd_help(message):
 "Эви, подъём" — вернуться
 
 📌 Важное:
-• Можно без команд: перевести, объяснить, проанализировать, сделать дз.
-• Я могу ошибаться. Дз — не всегда точно.
+• Можно без команд: перевести, объяснить, проанализировать.
+• Я могу ошибаться (галлюцинировать).
 • История сохраняется для улучшения качества Эви."""
     bot.reply_to(message, help_text)
 
@@ -1034,7 +1114,7 @@ def reply(message):
                 system_prompt += f"\nТвой персонаж: {bot_anketa}"
             if user_anketa:
                 system_prompt += f"\nПерсонаж игрока: {user_anketa}"
-            memory = get_rp_memory(session_id, 50)
+            memory = get_rp_memory(session_id, MEMORY_LIMIT)
         else:
             memory = []
     else:
@@ -1042,9 +1122,11 @@ def reply(message):
             system_prompt += "\n" + EXPLAIN_PROMPT
         if "проанализируй" in text_lower or "анализ" in text_lower:
             system_prompt += "\n" + ANALYZE_PROMPT
-        if "домашк" in text_lower or "дз" in text_lower:
-            system_prompt += "\n" + HOMEWORK_PROMPT
-        memory = get_memory(chat_id, 50)
+        memory = get_memory(chat_id, MEMORY_LIMIT)
+
+    summaries = get_summaries(chat_id, limit=3)
+    if summaries:
+        system_prompt += "\n\nКраткое содержание прошлых диалогов:\n" + "\n".join(summaries)
 
     facts = get_facts(chat_id, limit=5)
     if facts:
@@ -1092,13 +1174,18 @@ def reply(message):
                 save_rp_message(session[0], clean_text, "user")
                 save_rp_message(session[0], answer, "assistant")
         else:
-            save_message(user_id, chat_id, clean_text, "user")
+            compressed_text = compress_long_message(clean_text)
+            save_message(user_id, chat_id, compressed_text, "user")
             save_message(0, chat_id, answer, "assistant")
+
+            count = get_messages_count(chat_id)
+            if count > MEMORY_LIMIT + SUMMARIZE_EVERY:
+                summarize_old_messages(chat_id)
 
     except Exception as e:
         bot.reply_to(message, f"Ой, у меня сбой: {e}")
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.2 (рендер v3).")
+print("Эви запущена! Пакет 3.2 (сжатие + без дз).")
 bot.polling(none_stop=True)
