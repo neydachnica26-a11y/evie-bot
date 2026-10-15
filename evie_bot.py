@@ -189,13 +189,13 @@ def save_fact(user_id, chat_id, fact):
     finally:
         release_conn(conn)
 
-def get_facts(chat_id):
+def get_facts(chat_id, limit=5):
     conn = get_conn()
     if not conn:
         return []
     try:
         cur = conn.cursor()
-        cur.execute("SELECT fact FROM facts WHERE chat_id = %s", (chat_id,))
+        cur.execute("SELECT fact FROM facts WHERE chat_id = %s ORDER BY id DESC LIMIT %s", (chat_id, limit))
         return [r[0] for r in cur.fetchall()]
     except Exception as e:
         print(f"Ошибка get_facts: {e}")
@@ -516,45 +516,59 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-# ==== РЕНДЕР (v2) ====
-def extract_latex_blocks(text):
-    patterns = [
-        (r'\\\[(.*?)\\\]', True),
-        (r'\\\((.*?)\\\)', True),
-        (r'\\begin\{aligned\}(.*?)\\end\{aligned\}', True),
-        (r'\\begin\{matrix\}(.*?)\\end\{matrix\}', True),
-        (r'\\begin\{pmatrix\}(.*?)\\end\{pmatrix\}', True),
-    ]
-    found = []
-    for p, _ in patterns:
-        for m in re.findall(p, text, re.DOTALL):
-            clean = m.strip()
-            if clean and len(clean) > 3:
-                found.append(clean)
-    return found
+# ==== РЕНДЕР (v3) ====
+LATEX_MARKERS = ['\\frac', '\\sqrt', '\\mathbb', '\\dots', '\\quad', '\\begin', '\\end', '\\left', '\\right', '\\cdot', '\\times', '\\div', '\\pm', '\\mp', '\\leq', '\\geq', '\\neq', '\\approx', '\\infty', '\\sum', '\\int', '\\lim', '\\log', '\\ln', '\\sin', '\\cos', '\\tan', '^{', '_{', '\\boxed', '\\alpha', '\\beta', '\\gamma', '\\delta', '\\lambda', '\\mu', '\\pi', '\\sigma', '\\omega', '\\theta', '\\phi', '\\psi', '\\Delta', '\\Omega', '\\Sigma', '\\Pi', '\\parallel', '\\perp', '\\angle', '\\triangle']
 
-def clean_latex_from_text(text):
-    patterns = [
-        r'\\\[.*?\\\]',
-        r'\\\(.*?\\\)',
-        r'\\begin\{aligned\}.*?\\end\{aligned\}',
-        r'\\begin\{matrix\}.*?\\end\{matrix\}',
-        r'\\begin\{pmatrix\}.*?\\end\{pmatrix\}',
-    ]
-    for p in patterns:
-        text = re.sub(p, '', text, flags=re.DOTALL)
-    return text.strip()
+def has_latex_markers(line):
+    return any(m in line for m in LATEX_MARKERS)
 
 def has_cyrillic(text):
     return bool(re.search('[а-яА-ЯёЁ]', text))
 
+def extract_latex_blocks(text):
+    blocks = []
+    current = []
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if has_latex_markers(stripped) and not has_cyrillic(stripped):
+            current.append(stripped)
+        else:
+            if current:
+                block = ' '.join(current)
+                if 3 < len(block) < 500:
+                    blocks.append(block)
+                current = []
+    if current:
+        block = ' '.join(current)
+        if 3 < len(block) < 500:
+            blocks.append(block)
+    return blocks
+
+def clean_latex_from_text(text):
+    lines = text.split('\n')
+    clean_lines = []
+    for line in lines:
+        if has_latex_markers(line) and not has_cyrillic(line):
+            continue
+        clean_lines.append(line)
+    return '\n'.join(clean_lines).strip()
+
 def render_formula(latex_str):
     try:
-        if has_cyrillic(latex_str):
-            return None
         clean = latex_str.strip()
         clean = clean.replace('&', ' ')
         clean = re.sub(r'\\\\', ' ', clean)
+        clean = clean.replace('\\left', '').replace('\\right', '')
+        clean = clean.replace('\\boxed', '').replace('\\mathbb', '')
+        clean = clean.replace('\\quad', ' ').replace('\\dots', '...')
+        clean = clean.replace('\\,', ' ').replace('\\;', ' ').replace('\\!', '')
+        clean = re.sub(r'\\text\{[^}]*\}', '', clean)
+        clean = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', clean)
+        clean = clean.strip()
+        
+        if not clean or len(clean) < 2:
+            return None
+        
         expr = sp.sympify(clean)
         fig, ax = plt.subplots(figsize=(6, 2))
         ax.text(0.5, 0.5, f"${sp.latex(expr)}$", fontsize=20, ha='center', va='center')
@@ -582,8 +596,7 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Естественность — как живой человек.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
 В обычном разговоре — кратко (1–5 предложений).
-В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине.
-Формулы пиши в LaTeX: \\(...\\) для строчных, \\[...\\] для блочных. Без текста внутри формул."""
+В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине."""
 
 ADMIN_EXTRA = "Ты общаешься со своей создательницей. Она — твой создатель, но не подчёркивай это каждый раз."
 
@@ -1033,7 +1046,7 @@ def reply(message):
             system_prompt += "\n" + HOMEWORK_PROMPT
         memory = get_memory(chat_id, 50)
 
-    facts = get_facts(chat_id)
+    facts = get_facts(chat_id, limit=5)
     if facts:
         system_prompt += "\n\nВажные факты:\n" + "\n".join(facts)
 
@@ -1070,8 +1083,6 @@ def reply(message):
                 if img:
                     bot.send_photo(chat_id, img)
                     rendered_count += 1
-                else:
-                    bot.reply_to(message, f"`{block}`")
         else:
             bot.reply_to(message, answer)
 
@@ -1089,5 +1100,5 @@ def reply(message):
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.2 (рендер v2).")
+print("Эви запущена! Пакет 3.2 (рендер v3).")
 bot.polling(none_stop=True)
