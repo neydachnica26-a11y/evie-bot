@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
+import re
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -175,7 +176,6 @@ def clear_memory(chat_id):
     finally:
         release_conn(conn)
 
-# ==== ФАКТЫ ====
 def save_fact(user_id, chat_id, fact):
     conn = get_conn()
     if not conn:
@@ -203,7 +203,6 @@ def get_facts(chat_id):
     finally:
         release_conn(conn)
 
-# ==== РП СЕССИИ ====
 def get_active_session(chat_id):
     conn = get_conn()
     if not conn:
@@ -341,7 +340,6 @@ def get_rp_memory(session_id, limit=50):
     finally:
         release_conn(conn)
 
-# ==== АНКЕТЫ ====
 def save_anketa(user_id, anketa, is_bot=False):
     conn = get_conn()
     if not conn:
@@ -389,7 +387,6 @@ def clear_anketa(user_id, is_bot=False):
     finally:
         release_conn(conn)
 
-# ==== АДМИН ====
 def get_users():
     conn = get_conn()
     if not conn:
@@ -519,10 +516,31 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-# ==== РЕНДЕР ФОРМУЛ ====
+# ==== РЕНДЕР ====
+def extract_latex(text):
+    patterns = [
+        r'\\\[(.*?)\\\]',
+        r'\\\((.*?)\\\)',
+        r'\\begin\{.*?\}(.*?)\\end\{.*?\}'
+    ]
+    found = []
+    for p in patterns:
+        found.extend(re.findall(p, text, re.DOTALL))
+    return found
+
+def clean_latex_from_text(text):
+    patterns = [
+        r'\\\[.*?\\\]',
+        r'\\\(.*?\\\)',
+        r'\\begin\{.*?\}.*?\\end\{.*?\}'
+    ]
+    for p in patterns:
+        text = re.sub(p, '', text, flags=re.DOTALL)
+    return text.strip()
+
 def render_formula(latex_str):
     try:
-        clean = latex_str.replace('\\[', '').replace('\\]', '').replace('\\(', '').replace('\\)', '')
+        clean = latex_str.strip()
         expr = sp.sympify(clean)
         fig, ax = plt.subplots(figsize=(6, 2))
         ax.text(0.5, 0.5, f"${sp.latex(expr)}$", fontsize=20, ha='center', va='center')
@@ -535,9 +553,6 @@ def render_formula(latex_str):
     except Exception as e:
         print(f"Ошибка рендера: {e}")
         return None
-
-def has_latex(text):
-    return any(marker in text for marker in ['\\[', '\\]', '\\(', '\\)', '\\frac', '\\sqrt', '\\begin', '^{', '_{'])
 
 # ==== ФРАЗЫ ====
 MUTE_PHRASES = ["эви, заткнись", "эви заткнись", "эви, замолчи", "эви замолчи", "эви, молчи", "эви молчи", "эви, тихо", "эви тихо", "эви, рот офф", "эви рот офф", "эви, ротик офф", "эви ротик офф", "эви, оффнись", "эви оффнись", "эви, шшш", "эви шшш"]
@@ -570,29 +585,27 @@ PERSONALITIES = {
 
 ANALYZE_PROMPT = """
 Когда просят проанализировать:
-Алгоритм:
-1. Выделение главного (если не очевидно — сформулируй сама)
+1. Выделение главного
 2. Разбор на части: тезисы, аргументы, примеры
 3. Связи: причина — следствие
 4. Оценка: важное, факты vs мнения
 5. Вывод
-Важное: чётко, без воды. Не придумывай факты. Если текст маленький — ответь кратко."""
+Чётко, без воды. Не придумывай факты."""
 
 EXPLAIN_PROMPT = """
 Когда просят объяснить:
 - Чётко, по делу, постепенно.
 - Подстраивайся под уровень.
-- Без воды. Если не понял — другой пример/аналогия.
+- Если не понял — другой пример.
 - В конце спроси, понятно ли."""
 
 HOMEWORK_PROMPT = """
-Когда просят решить домашнее задание:
-- Внимательно читаешь условия.
+Когда просят решить дз:
 - Пошагово, не прыгая через шаги.
 - Сначала принцип, потом решение.
-- Учитываешь уровень (класс, предмет).
+- Учитываешь уровень.
 - Проверяешь ответ.
-- Если непонятно — спроси, не выдумывай."""
+- Если непонятно — спроси."""
 
 RP_PROMPT = """
 Ты в режиме РП.
@@ -606,34 +619,10 @@ RP_PROMPT = """
 ОГРАНИЧЕНИЯ:
 - 18+ запрещено.
 - Жестокость в рамках фэнтези разрешена.
-- Политика, религия — осторожно.
 
 ПЕРСОНАЖ:
 - Если игрок задал анкету — отыгрываешь его персонажа.
 - Если нет — генерируешь простого и сохраняешь.
-- Игрок может сменить персонажа (/rp_clear_bot).
-
-АНКЕТА (можно заполнять не все пункты):
-Описание:
-Вид/раса:
-Пол:
-Имя:
-Возраст/д.р.:
-Вес:
-Рост:
-Сила:
-Скорость:
-Скрытность:
-Стойкость/Выносливость:
-Характер:
-Увлечения/Хобби:
-Умения:
-Любит:
-Страхи:
-Слабости:
-Снаряжение:
-Оружие:
-Способности:
 """
 
 RP_ANKETA_TEMPLATE = """📝 Пример анкеты (можно заполнять не все пункты):
@@ -684,14 +673,13 @@ def cmd_help(message):
 • Анализировать
 • Помогать с домашкой
 • Вести РП
-• Запоминать факты
 • Рисовать формулы
 
 Общие команды:
 /start — приветствие
 /help — эта справка
-/off — заткнуться (можно словосочетаниями)
-/on — вернуться (можно словосочетаниями)
+/off — заткнуться
+/on — вернуться
 /remember — запомнить факт
 
 РП режим:
@@ -700,36 +688,32 @@ def cmd_help(message):
 
 Личности (/mode_...):
 /mode_normal — обычная (сарказм, юмор)
-/mode_serious — серьёзная (чётко, по делу, для учёбы)
-/mode_fun — весёлая (шутки, лёгкость)
-/mode_sad — грустная (меланхолия, тихая)
+/mode_serious — серьёзная (для учёбы)
+/mode_fun — весёлая (шутки)
+/mode_sad — грустная (меланхолия)
 /mode_angry — злая (резкая, ворчливая)
-/mode_kind — добрая (тепло, поддержка)
-/mode_sharp — резкая (дерзкая, сарказм на грани)
-/mode_deep — глубокая (философия, двойное дно)
+/mode_kind — добрая (тепло)
+/mode_sharp — резкая (сарказм на грани)
+/mode_deep — глубокая (философия)
 
 💡 "Эви, шшш" — замолчать
 "Эви, подъём" — вернуться
 
 📌 Важное:
-• Можно попросить без команд: перевести, объяснить, проанализировать, сделать дз.
-• Можно добавлять в группы.
-• Я могу ошибаться (галлюцинировать). Дз — не всегда точно.
+• Можно без команд: перевести, объяснить, проанализировать, сделать дз.
+• Я могу ошибаться. Дз — не всегда точно.
 • История сохраняется для улучшения качества Эви."""
     bot.reply_to(message, help_text)
 
     if message.from_user.id == ADMIN_ID:
         admin_help = """👑 Админ-команды:
 
-Пользователи:
 /users — список пользователей
 /user_ID — инфо о пользователе
-/userhistory_ID — переписка с пользователем
+/userhistory_ID — переписка
 /stats — статистика
 /broadcast [текст] — рассылка
-
-Whitelist:
-/whitelist_on — включить
+/whitelist_on — включить whitelist
 /whitelist_off — выключить
 /allow_ID — добавить
 /deny_ID — убрать"""
@@ -738,7 +722,7 @@ Whitelist:
 @bot.message_handler(commands=['off'])
 def cmd_off(message):
     muted_chats.add(message.chat.id)
-    bot.reply_to(message, "Ок, молчу 🤐 Напиши /on или 'Эви, вернись'.")
+    bot.reply_to(message, "Ок, молчу 🤐 Напиши /on.")
 
 @bot.message_handler(commands=['on'])
 def cmd_on(message):
@@ -754,12 +738,11 @@ def cmd_remember(message):
     save_fact(message.from_user.id, message.chat.id, fact)
     bot.reply_to(message, f"Запомнила! 📌 ({fact})")
 
-# ==== РЕЖИМЫ ====
 @bot.message_handler(commands=['mode_normal', 'mode_serious', 'mode_fun', 'mode_sad', 'mode_angry', 'mode_kind', 'mode_sharp', 'mode_deep'])
 def cmd_mode(message):
     mode_name = message.text.replace("/mode_", "").strip().lower()
     if mode_name not in PERSONALITIES:
-        bot.reply_to(message, f"Доступные личности: {', '.join(PERSONALITIES.keys())}")
+        bot.reply_to(message, f"Доступные: {', '.join(PERSONALITIES.keys())}")
         return
     modes[message.chat.id] = mode_name
     bot.reply_to(message, f"Переключилась в режим «{mode_name}» 🎭")
@@ -774,10 +757,8 @@ def cmd_rp_on(message):
         if not session_id:
             bot.reply_to(message, "Ошибка создания сессии.")
             return
-    else:
-        session_id = session[0]
     rp_mode.add(chat_id)
-    bot.reply_to(message, "🎭 Режим РП активирован.\n\nОБОЗНАЧЕНИЯ:\n//...// — вне РП\n*...* — действия\n💭...💭 — мысли\n(...) — уточнения\n\nОГРАНИЧЕНИЯ:\n18+ запрещено.\nЖестокость в рамках фэнтези разрешена.\nПолитика, религия — осторожно.\n\nКОМАНДЫ:\n/rp_off — выйти\n/rp_archive [название] — в архив\n/rp_list — список архивов\n/rp_continue [название] — вернуть\n/rp_delete [название] — удалить\n/rp_reset — сбросить сессию\n/rp_set_bot — анкета Эви\n/rp_clear_bot — очистить\n/rp_set_me — своя анкета\n/rp_clear_me — очистить\n/rp_info — показать анкеты")
+    bot.reply_to(message, "🎭 Режим РП активирован.\n\n//...// — вне РП\n*...* — действия\n💭...💭 — мысли\n(...) — уточнения\n\n/rp_off, /rp_archive, /rp_list, /rp_continue, /rp_delete, /rp_reset, /rp_set_bot, /rp_clear_bot, /rp_set_me, /rp_clear_me, /rp_info")
     bot.send_message(chat_id, RP_ANKETA_TEMPLATE)
 
 @bot.message_handler(commands=['rp_off'])
@@ -798,7 +779,7 @@ def cmd_rp_archive(message):
         return
     archive_session(session[0], name)
     rp_mode.discard(chat_id)
-    bot.reply_to(message, f"Сессия «{name}» сохранена в архив 📚")
+    bot.reply_to(message, f"Сессия «{name}» сохранена 📚")
 
 @bot.message_handler(commands=['rp_list'])
 def cmd_rp_list(message):
@@ -822,7 +803,7 @@ def cmd_rp_continue(message):
         bot.reply_to(message, "Сессия не найдена.")
         return
     rp_mode.add(message.chat.id)
-    bot.reply_to(message, f"Сессия «{name}» восстановлена 🎭 Продолжаем!")
+    bot.reply_to(message, f"Сессия «{name}» восстановлена 🎭")
 
 @bot.message_handler(commands=['rp_delete'])
 def cmd_rp_delete(message):
@@ -844,7 +825,7 @@ def cmd_rp_reset(message):
 
 @bot.message_handler(commands=['rp_set_bot'])
 def cmd_rp_set_bot(message):
-    bot.reply_to(message, "Напиши анкету Эви. Отправь текст в одном сообщении.")
+    bot.reply_to(message, "Напиши анкету Эви.")
     bot.register_next_step_handler(message, save_bot_anketa)
 
 @bot.message_handler(commands=['rp_clear_bot'])
@@ -854,7 +835,7 @@ def cmd_rp_clear_bot(message):
 
 @bot.message_handler(commands=['rp_set_me'])
 def cmd_rp_set_me(message):
-    bot.reply_to(message, "Напиши свою анкету. Отправь текст в одном сообщении.")
+    bot.reply_to(message, "Напиши свою анкету.")
     bot.register_next_step_handler(message, save_me_anketa)
 
 @bot.message_handler(commands=['rp_clear_me'])
@@ -877,7 +858,7 @@ def save_me_anketa(message):
     save_anketa(message.from_user.id, message.text, is_bot=False)
     bot.reply_to(message, "Твоя анкета сохранена. 📌")
 
-# ==== АДМИН-КОМАНДЫ ====
+# ==== АДМИН ====
 @bot.message_handler(commands=['users'])
 def cmd_users(message):
     if message.from_user.id != ADMIN_ID:
@@ -904,26 +885,26 @@ def cmd_admin_with_id(message):
     if cmd == 'user':
         info = get_user_info(uid)
         if not info:
-            bot.reply_to(message, "Пользователь не найден.")
+            bot.reply_to(message, "Не найден.")
             return
-        text = f"📊 Пользователь:\nID: {info[0]}\nИмя: {info[1]}\n@{info[2] or '—'}\nПервый раз: {info[3]}\nПоследний раз: {info[4]}\nСообщений: {info[5]}\nРоль: {info[6]}"
+        text = f"📊 ID: {info[0]}\nИмя: {info[1]}\n@{info[2] or '—'}\nПервый: {info[3]}\nПоследний: {info[4]}\nСообщений: {info[5]}\nРоль: {info[6]}"
         bot.reply_to(message, text)
     elif cmd == 'userhistory':
         history = get_user_history(uid, 50)
         if not history:
-            bot.reply_to(message, "История пуста.")
+            bot.reply_to(message, "Пусто.")
             return
-        text = f"📝 Переписка с {uid}:\n\n"
+        text = f"📝 История {uid}:\n\n"
         for h in history:
             role = "👤" if h[1] == "user" else "🤖"
             text += f"{role} {h[0][:100]}\n\n"
         bot.reply_to(message, text[:4000])
     elif cmd == 'allow':
         add_whitelist(uid)
-        bot.reply_to(message, f"Пользователь {uid} добавлен в whitelist.")
+        bot.reply_to(message, f"{uid} добавлен.")
     elif cmd == 'deny':
         remove_whitelist(uid)
-        bot.reply_to(message, f"Пользователь {uid} убран из whitelist.")
+        bot.reply_to(message, f"{uid} убран.")
 
 @bot.message_handler(commands=['stats'])
 def cmd_stats(message):
@@ -933,7 +914,7 @@ def cmd_stats(message):
     if not stats:
         bot.reply_to(message, "Ошибка.")
         return
-    bot.reply_to(message, f"📊 Статистика:\n👥 Пользователей: {stats[0]}\n💬 Сообщений: {stats[1]}")
+    bot.reply_to(message, f"📊 Юзеров: {stats[0]}\n💬 Сообщений: {stats[1]}")
 
 @bot.message_handler(commands=['broadcast'])
 def cmd_broadcast(message):
@@ -951,7 +932,7 @@ def cmd_broadcast(message):
             count += 1
         except:
             pass
-    bot.reply_to(message, f"Рассылка отправлена {count} пользователям.")
+    bot.reply_to(message, f"Отправлено {count}.")
 
 @bot.message_handler(commands=['whitelist_on'])
 def cmd_whitelist_on(message):
@@ -991,7 +972,7 @@ def reply(message):
     for phrase in MUTE_PHRASES:
         if phrase in text_lower:
             muted_chats.add(chat_id)
-            bot.reply_to(message, "Ок, молчу 🤐 Напиши 'Эви, вернись'.")
+            bot.reply_to(message, "Ок, молчу 🤐")
             return
 
     bot_username = bot.get_me().username
@@ -1033,7 +1014,7 @@ def reply(message):
             system_prompt += "\n" + EXPLAIN_PROMPT
         if "проанализируй" in text_lower or "анализ" in text_lower:
             system_prompt += "\n" + ANALYZE_PROMPT
-        if "домашка" in text_lower or "дз" in text_lower:
+        if "домашк" in text_lower or "дз" in text_lower:
             system_prompt += "\n" + HOMEWORK_PROMPT
         memory = get_memory(chat_id, 50)
 
@@ -1060,13 +1041,17 @@ def reply(message):
         if not answer or not answer.strip():
             answer = "Хм, задумалась 🤔 Попробуй ещё раз."
 
-        if has_latex(answer):
-            img = render_formula(answer)
-            if img:
-                bot.send_photo(chat_id, img)
-                bot.reply_to(message, "Формула на картинке 👆")
-            else:
-                bot.reply_to(message, answer)
+        latex_parts = extract_latex(answer)
+        if latex_parts:
+            clean_text_answer = clean_latex_from_text(answer)
+            if clean_text_answer:
+                bot.reply_to(message, clean_text_answer)
+            for part in latex_parts:
+                img = render_formula(part)
+                if img:
+                    bot.send_photo(chat_id, img)
+                else:
+                    bot.reply_to(message, f"`{part}`")
         else:
             bot.reply_to(message, answer)
 
@@ -1084,5 +1069,5 @@ def reply(message):
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.2.")
+print("Эви запущена! Пакет 3.2 + рендер.")
 bot.polling(none_stop=True)
