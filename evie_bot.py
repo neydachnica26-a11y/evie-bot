@@ -3,6 +3,11 @@ from openai import OpenAI
 import os
 import psycopg2
 from psycopg2 import pool
+import sympy as sp
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import io
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -78,6 +83,33 @@ def init_db():
                 value TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS facts (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                chat_id BIGINT,
+                fact TEXT,
+                time TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rp_sessions (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                name TEXT,
+                created TIMESTAMP DEFAULT NOW(),
+                archived BOOLEAN DEFAULT FALSE
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rp_messages (
+                id SERIAL PRIMARY KEY,
+                session_id INTEGER,
+                text TEXT,
+                role TEXT,
+                time TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
     except Exception as e:
         print(f"Ошибка init_db: {e}")
@@ -143,6 +175,221 @@ def clear_memory(chat_id):
     finally:
         release_conn(conn)
 
+# ==== ФАКТЫ ====
+def save_fact(user_id, chat_id, fact):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO facts (user_id, chat_id, fact) VALUES (%s, %s, %s)", (user_id, chat_id, fact))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка save_fact: {e}")
+    finally:
+        release_conn(conn)
+
+def get_facts(chat_id):
+    conn = get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT fact FROM facts WHERE chat_id = %s", (chat_id,))
+        return [r[0] for r in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка get_facts: {e}")
+        return []
+    finally:
+        release_conn(conn)
+
+# ==== РП СЕССИИ ====
+def get_active_session(chat_id):
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM rp_sessions WHERE chat_id = %s AND archived = FALSE ORDER BY id DESC LIMIT 1", (chat_id,))
+        return cur.fetchone()
+    except Exception as e:
+        print(f"Ошибка get_active_session: {e}")
+        return None
+    finally:
+        release_conn(conn)
+
+def create_session(chat_id):
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO rp_sessions (chat_id, name, archived) VALUES (%s, %s, FALSE) RETURNING id", (chat_id, "Без названия"))
+        session_id = cur.fetchone()[0]
+        conn.commit()
+        return session_id
+    except Exception as e:
+        print(f"Ошибка create_session: {e}")
+        return None
+    finally:
+        release_conn(conn)
+
+def archive_session(session_id, name):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE rp_sessions SET name = %s, archived = TRUE WHERE id = %s", (name, session_id))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка archive_session: {e}")
+    finally:
+        release_conn(conn)
+
+def get_archived_sessions(chat_id):
+    conn = get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, created FROM rp_sessions WHERE chat_id = %s AND archived = TRUE ORDER BY id DESC", (chat_id,))
+        return cur.fetchall()
+    except Exception as e:
+        print(f"Ошибка get_archived_sessions: {e}")
+        return []
+    finally:
+        release_conn(conn)
+
+def continue_session(chat_id, name):
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM rp_sessions WHERE chat_id = %s AND name = %s AND archived = TRUE LIMIT 1", (chat_id, name))
+        row = cur.fetchone()
+        if not row:
+            return None
+        session_id = row[0]
+        cur.execute("UPDATE rp_sessions SET archived = FALSE WHERE id = %s", (session_id,))
+        conn.commit()
+        return session_id
+    except Exception as e:
+        print(f"Ошибка continue_session: {e}")
+        return None
+    finally:
+        release_conn(conn)
+
+def delete_session(chat_id, name):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM rp_sessions WHERE chat_id = %s AND name = %s LIMIT 1", (chat_id, name))
+        row = cur.fetchone()
+        if row:
+            session_id = row[0]
+            cur.execute("DELETE FROM rp_messages WHERE session_id = %s", (session_id,))
+            cur.execute("DELETE FROM rp_sessions WHERE id = %s", (session_id,))
+            conn.commit()
+    except Exception as e:
+        print(f"Ошибка delete_session: {e}")
+    finally:
+        release_conn(conn)
+
+def clear_session_messages(session_id):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM rp_messages WHERE session_id = %s", (session_id,))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка clear_session_messages: {e}")
+    finally:
+        release_conn(conn)
+
+def save_rp_message(session_id, text, role):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO rp_messages (session_id, text, role) VALUES (%s, %s, %s)", (session_id, text, role))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка save_rp_message: {e}")
+    finally:
+        release_conn(conn)
+
+def get_rp_memory(session_id, limit=50):
+    conn = get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT text, role FROM rp_messages WHERE session_id = %s ORDER BY id DESC LIMIT %s", (session_id, limit))
+        rows = cur.fetchall()
+        rows.reverse()
+        return [{"role": r[1], "content": r[0]} for r in rows]
+    except Exception as e:
+        print(f"Ошибка get_rp_memory: {e}")
+        return []
+    finally:
+        release_conn(conn)
+
+# ==== АНКЕТЫ ====
+def save_anketa(user_id, anketa, is_bot=False):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO rp_anketa (user_id, anketa, is_bot) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET anketa = %s", (user_id, anketa, is_bot, anketa))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка save_anketa: {e}")
+    finally:
+        release_conn(conn)
+
+def get_anketa(user_id, is_bot=False):
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        if is_bot:
+            cur.execute("SELECT anketa FROM rp_anketa WHERE is_bot = TRUE LIMIT 1")
+        else:
+            cur.execute("SELECT anketa FROM rp_anketa WHERE user_id = %s AND is_bot = FALSE", (user_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"Ошибка get_anketa: {e}")
+        return None
+    finally:
+        release_conn(conn)
+
+def clear_anketa(user_id, is_bot=False):
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        if is_bot:
+            cur.execute("DELETE FROM rp_anketa WHERE is_bot = TRUE")
+        else:
+            cur.execute("DELETE FROM rp_anketa WHERE user_id = %s AND is_bot = FALSE", (user_id,))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка clear_anketa: {e}")
+    finally:
+        release_conn(conn)
+
+# ==== АДМИН ====
 def get_users():
     conn = get_conn()
     if not conn:
@@ -272,52 +519,25 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-def save_anketa(user_id, anketa, is_bot=False):
-    conn = get_conn()
-    if not conn:
-        return
+# ==== РЕНДЕР ФОРМУЛ ====
+def render_formula(latex_str):
     try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO rp_anketa (user_id, anketa, is_bot) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET anketa = %s", (user_id, anketa, is_bot, anketa))
-        conn.commit()
+        clean = latex_str.replace('\\[', '').replace('\\]', '').replace('\\(', '').replace('\\)', '')
+        expr = sp.sympify(clean)
+        fig, ax = plt.subplots(figsize=(6, 2))
+        ax.text(0.5, 0.5, f"${sp.latex(expr)}$", fontsize=20, ha='center', va='center')
+        ax.axis('off')
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+        buf.seek(0)
+        plt.close(fig)
+        return buf
     except Exception as e:
-        print(f"Ошибка save_anketa: {e}")
-    finally:
-        release_conn(conn)
-
-def get_anketa(user_id, is_bot=False):
-    conn = get_conn()
-    if not conn:
+        print(f"Ошибка рендера: {e}")
         return None
-    try:
-        cur = conn.cursor()
-        if is_bot:
-            cur.execute("SELECT anketa FROM rp_anketa WHERE is_bot = TRUE LIMIT 1")
-        else:
-            cur.execute("SELECT anketa FROM rp_anketa WHERE user_id = %s AND is_bot = FALSE", (user_id,))
-        row = cur.fetchone()
-        return row[0] if row else None
-    except Exception as e:
-        print(f"Ошибка get_anketa: {e}")
-        return None
-    finally:
-        release_conn(conn)
 
-def clear_anketa(user_id, is_bot=False):
-    conn = get_conn()
-    if not conn:
-        return
-    try:
-        cur = conn.cursor()
-        if is_bot:
-            cur.execute("DELETE FROM rp_anketa WHERE is_bot = TRUE")
-        else:
-            cur.execute("DELETE FROM rp_anketa WHERE user_id = %s AND is_bot = FALSE", (user_id,))
-        conn.commit()
-    except Exception as e:
-        print(f"Ошибка clear_anketa: {e}")
-    finally:
-        release_conn(conn)
+def has_latex(text):
+    return any(marker in text for marker in ['\\[', '\\]', '\\(', '\\)', '\\frac', '\\sqrt', '\\begin', '^{', '_{'])
 
 # ==== ФРАЗЫ ====
 MUTE_PHRASES = ["эви, заткнись", "эви заткнись", "эви, замолчи", "эви замолчи", "эви, молчи", "эви молчи", "эви, тихо", "эви тихо", "эви, рот офф", "эви рот офф", "эви, ротик офф", "эви ротик офф", "эви, оффнись", "эви оффнись", "эви, шшш", "эви шшш"]
@@ -332,8 +552,6 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Не переигрывай характер, не льсти, не называй пользователя «создателем» каждый раз.
 Естественность — как живой человек.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
-Формулы пиши БЕЗ LaTeX. Не используй: \(, \), \frac, \sqrt, \gamma, \begin, \end, ^{}, _{}.
-Пиши простым текстом.
 В обычном разговоре — кратко (1–5 предложений).
 В задачах (анализ, ДЗ, объяснение, РП) — без ограничений по длине."""
 
@@ -374,8 +592,7 @@ HOMEWORK_PROMPT = """
 - Сначала принцип, потом решение.
 - Учитываешь уровень (класс, предмет).
 - Проверяешь ответ.
-- Если непонятно — спроси, не выдумывай.
-- Формулы — простым текстом, без LaTeX."""
+- Если непонятно — спроси, не выдумывай."""
 
 RP_PROMPT = """
 Ты в режиме РП.
@@ -419,7 +636,7 @@ RP_PROMPT = """
 Способности:
 """
 
-RP_ANKETA_TEMPLATE = """🎭 Пример анкеты для РП (можно заполнять не все пункты):
+RP_ANKETA_TEMPLATE = """📝 Пример анкеты (можно заполнять не все пункты):
 
 Описание:
 Вид/раса:
@@ -467,6 +684,8 @@ def cmd_help(message):
 • Анализировать
 • Помогать с домашкой
 • Вести РП
+• Запоминать факты
+• Рисовать формулы
 
 Общие команды:
 /start — приветствие
@@ -478,7 +697,11 @@ def cmd_help(message):
 РП режим:
 /rp_on — включить РП
 /rp_off — выключить РП
-/rp_reset — сбросить сессию РП (историю диалога)
+/rp_archive [название] — сохранить в архив
+/rp_list — список архивов
+/rp_continue [название] — вернуть из архива
+/rp_delete [название] — удалить архив
+/rp_reset — сбросить текущую сессию
 
 Личности (/mode_...):
 /mode_normal — обычная (сарказм, юмор)
@@ -492,7 +715,6 @@ def cmd_help(message):
 
 💡 "Эви, шшш" — замолчать
 "Эви, подъём" — вернуться
-(Можно подбирать разные словосочетания словами. Эти фразы и команды разработаны для группы)
 
 📌 Важное:
 • Можно попросить без команд: перевести, объяснить, проанализировать, сделать дз.
@@ -506,7 +728,7 @@ def cmd_help(message):
 
 Пользователи:
 /users — список пользователей
-/user_ID — инфо о пользователе (пример: /user_6638227198)
+/user_ID — инфо о пользователе
 /userhistory_ID — переписка с пользователем
 /stats — статистика
 /broadcast [текст] — рассылка
@@ -534,7 +756,7 @@ def cmd_remember(message):
     if not fact:
         bot.reply_to(message, "Что запомнить? Напиши: /remember я учусь в 10 классе")
         return
-    save_message(message.from_user.id, message.chat.id, f"Важный факт: {fact}", "system")
+    save_fact(message.from_user.id, message.chat.id, fact)
     bot.reply_to(message, f"Запомнила! 📌 ({fact})")
 
 # ==== РЕЖИМЫ ====
@@ -550,19 +772,80 @@ def cmd_mode(message):
 # ==== РП ====
 @bot.message_handler(commands=['rp_on'])
 def cmd_rp_on(message):
-    rp_mode.add(message.chat.id)
-    bot.reply_to(message, "🎭 Режим РП активирован.\n\nПравила:\n//...// — вне РП\n*...* — действия\n💭...💭 — мысли\n(...) — уточнения\n\nКоманды:\n/rp_off — выйти\n/rp_reset — сбросить сессию\n/rp_set_bot — анкета Эви\n/rp_clear_bot — очистить\n/rp_set_me — своя анкета\n/rp_clear_me — очистить\n/rp_info — показать анкеты")
-    bot.send_message(message.chat.id, RP_ANKETA_TEMPLATE)
+    chat_id = message.chat.id
+    session = get_active_session(chat_id)
+    if not session:
+        session_id = create_session(chat_id)
+        if not session_id:
+            bot.reply_to(message, "Ошибка создания сессии.")
+            return
+    else:
+        session_id = session[0]
+    rp_mode.add(chat_id)
+    bot.reply_to(message, "🎭 Режим РП активирован.\n\nОБОЗНАЧЕНИЯ:\n//...// — вне РП\n*...* — действия\n💭...💭 — мысли\n(...) — уточнения\n\nОГРАНИЧЕНИЯ:\n18+ запрещено.\nЖестокость в рамках фэнтези разрешена.\nПолитика, религия — осторожно.\n\nКОМАНДЫ:\n/rp_off — выйти\n/rp_archive [название] — в архив\n/rp_list — список архивов\n/rp_continue [название] — вернуть\n/rp_delete [название] — удалить\n/rp_reset — сбросить сессию\n/rp_set_bot — анкета Эви\n/rp_clear_bot — очистить\n/rp_set_me — своя анкета\n/rp_clear_me — очистить\n/rp_info — показать анкеты")
+    bot.send_message(chat_id, RP_ANKETA_TEMPLATE)
 
 @bot.message_handler(commands=['rp_off'])
 def cmd_rp_off(message):
     rp_mode.discard(message.chat.id)
     bot.reply_to(message, "Режим РП выключен.")
 
+@bot.message_handler(commands=['rp_archive'])
+def cmd_rp_archive(message):
+    chat_id = message.chat.id
+    name = message.text.replace("/rp_archive", "").strip()
+    if not name:
+        bot.reply_to(message, "Укажи название: /rp_archive Поход в лес")
+        return
+    session = get_active_session(chat_id)
+    if not session:
+        bot.reply_to(message, "Нет активной сессии.")
+        return
+    archive_session(session[0], name)
+    rp_mode.discard(chat_id)
+    bot.reply_to(message, f"Сессия «{name}» сохранена в архив 📚")
+
+@bot.message_handler(commands=['rp_list'])
+def cmd_rp_list(message):
+    sessions = get_archived_sessions(message.chat.id)
+    if not sessions:
+        bot.reply_to(message, "Архив пуст.")
+        return
+    text = "📚 Твои РП-сессии:\n\n"
+    for s in sessions:
+        text += f"• «{s[1]}» ({s[2].strftime('%d.%m.%Y')})\n"
+    bot.reply_to(message, text)
+
+@bot.message_handler(commands=['rp_continue'])
+def cmd_rp_continue(message):
+    name = message.text.replace("/rp_continue", "").strip()
+    if not name:
+        bot.reply_to(message, "Укажи название: /rp_continue Поход в лес")
+        return
+    session_id = continue_session(message.chat.id, name)
+    if not session_id:
+        bot.reply_to(message, "Сессия не найдена.")
+        return
+    rp_mode.add(message.chat.id)
+    bot.reply_to(message, f"Сессия «{name}» восстановлена 🎭 Продолжаем!")
+
+@bot.message_handler(commands=['rp_delete'])
+def cmd_rp_delete(message):
+    name = message.text.replace("/rp_delete", "").strip()
+    if not name:
+        bot.reply_to(message, "Укажи название: /rp_delete Поход в лес")
+        return
+    delete_session(message.chat.id, name)
+    bot.reply_to(message, f"Сессия «{name}» удалена.")
+
 @bot.message_handler(commands=['rp_reset'])
 def cmd_rp_reset(message):
-    clear_memory(message.chat.id)
-    bot.reply_to(message, "РП сессия сброшена 🎭 Начнём заново. Анкеты сохранены.")
+    session = get_active_session(message.chat.id)
+    if not session:
+        bot.reply_to(message, "Нет активной сессии.")
+        return
+    clear_session_messages(session[0])
+    bot.reply_to(message, "Сессия сброшена 🎭 Анкеты сохранены.")
 
 @bot.message_handler(commands=['rp_set_bot'])
 def cmd_rp_set_bot(message):
@@ -680,14 +963,14 @@ def cmd_whitelist_on(message):
     if message.from_user.id != ADMIN_ID:
         return
     set_whitelist_on('1')
-    bot.reply_to(message, "Whitelist включён. Только разрешённые могут писать.")
+    bot.reply_to(message, "Whitelist включён.")
 
 @bot.message_handler(commands=['whitelist_off'])
 def cmd_whitelist_off(message):
     if message.from_user.id != ADMIN_ID:
         return
     set_whitelist_on('0')
-    bot.reply_to(message, "Whitelist выключен. Все могут писать.")
+    bot.reply_to(message, "Whitelist выключен.")
 
 # ==== ОСНОВНАЯ ЛОГИКА ====
 @bot.message_handler(func=lambda m: True, content_types=['text'])
@@ -737,13 +1020,19 @@ def reply(message):
     system_prompt = BASE_PROMPT + "\n" + personality
 
     if chat_id in rp_mode:
-        system_prompt += "\n" + RP_PROMPT
-        bot_anketa = get_anketa(ADMIN_ID, is_bot=True)
-        user_anketa = get_anketa(user_id, is_bot=False)
-        if bot_anketa:
-            system_prompt += f"\nТвой персонаж: {bot_anketa}"
-        if user_anketa:
-            system_prompt += f"\nПерсонаж игрока: {user_anketa}"
+        session = get_active_session(chat_id)
+        if session:
+            session_id = session[0]
+            system_prompt += "\n" + RP_PROMPT
+            bot_anketa = get_anketa(ADMIN_ID, is_bot=True)
+            user_anketa = get_anketa(user_id, is_bot=False)
+            if bot_anketa:
+                system_prompt += f"\nТвой персонаж: {bot_anketa}"
+            if user_anketa:
+                system_prompt += f"\nПерсонаж игрока: {user_anketa}"
+            memory = get_rp_memory(session_id, 50)
+        else:
+            memory = []
     else:
         if "объясни" in text_lower:
             system_prompt += "\n" + EXPLAIN_PROMPT
@@ -751,13 +1040,17 @@ def reply(message):
             system_prompt += "\n" + ANALYZE_PROMPT
         if "домашк" in text_lower or "дз" in text_lower:
             system_prompt += "\n" + HOMEWORK_PROMPT
+        memory = get_memory(chat_id, 50)
+
+    facts = get_facts(chat_id)
+    if facts:
+        system_prompt += "\n\nВажные факты:\n" + "\n".join(facts)
 
     if user_id == ADMIN_ID:
         system_prompt += "\n" + ADMIN_EXTRA
     else:
         system_prompt += f"\nТы общаешься с {message.from_user.first_name}."
 
-    memory = get_memory(chat_id, 50)
     messages_list = [{"role": "system", "content": system_prompt}]
     messages_list.extend(memory)
     messages_list.append({"role": "user", "content": clean_text})
@@ -771,13 +1064,30 @@ def reply(message):
         answer = response.choices[0].message.content
         if not answer or not answer.strip():
             answer = "Хм, задумалась 🤔 Попробуй ещё раз."
-        bot.reply_to(message, answer)
-        save_message(user_id, chat_id, clean_text, "user")
-        save_message(0, chat_id, answer, "assistant")
+
+        if has_latex(answer):
+            img = render_formula(answer)
+            if img:
+                bot.send_photo(chat_id, img)
+                bot.reply_to(message, "Формула на картинке 👆")
+            else:
+                bot.reply_to(message, answer)
+        else:
+            bot.reply_to(message, answer)
+
+        if chat_id in rp_mode:
+            session = get_active_session(chat_id)
+            if session:
+                save_rp_message(session[0], clean_text, "user")
+                save_rp_message(session[0], answer, "assistant")
+        else:
+            save_message(user_id, chat_id, clean_text, "user")
+            save_message(0, chat_id, answer, "assistant")
+
     except Exception as e:
         bot.reply_to(message, f"Ой, у меня сбой: {e}")
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3 + полировка.")
+print("Эви запущена! Пакет 3.2.")
 bot.polling(none_stop=True)
