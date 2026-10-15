@@ -697,11 +697,6 @@ def cmd_help(message):
 РП режим:
 /rp_on — включить РП
 /rp_off — выключить РП
-/rp_archive [название] — сохранить в архив
-/rp_list — список архивов
-/rp_continue [название] — вернуть из архива
-/rp_delete [название] — удалить архив
-/rp_reset — сбросить текущую сессию
 
 Личности (/mode_...):
 /mode_normal — обычная (сарказм, юмор)
@@ -1038,7 +1033,7 @@ def reply(message):
             system_prompt += "\n" + EXPLAIN_PROMPT
         if "проанализируй" in text_lower or "анализ" in text_lower:
             system_prompt += "\n" + ANALYZE_PROMPT
-        if "домашк" in text_lower or "дз" in text_lower:
+        if "домашка" in text_lower or "дз" in text_lower:
             system_prompt += "\n" + HOMEWORK_PROMPT
         memory = get_memory(chat_id, 50)
 
