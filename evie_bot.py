@@ -3,7 +3,6 @@ from openai import OpenAI
 import os
 import psycopg2
 from psycopg2 import pool
-import sympy as sp
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -605,7 +604,7 @@ def set_whitelist_on(value):
     finally:
         release_conn(conn)
 
-# ==== РЕНДЕР (v4) ====
+# ==== РЕНДЕР (v5, Matplotlib mathtext) ====
 def has_cyrillic(text):
     return bool(re.search('[а-яА-ЯёЁ]', text))
 
@@ -618,9 +617,6 @@ def extract_latex_blocks(text):
     for p in patterns:
         for m in re.findall(p, text, re.DOTALL):
             clean = m.strip()
-            clean = re.sub(r'\\\\', ' ', clean)
-            clean = clean.replace('&', ' ')
-            clean = clean.strip()
             if clean and not has_cyrillic(clean) and 3 < len(clean) < 500:
                 blocks.append(clean)
     return blocks
@@ -641,18 +637,15 @@ def render_formula(latex_str):
         clean = re.sub(r'\\\\', ' ', clean)
         clean = clean.replace('\\left', '').replace('\\right', '')
         clean = clean.replace('\\boxed', '').replace('\\mathbb', '')
-        clean = clean.replace('\\quad', ' ').replace('\\dots', '...')
-        clean = clean.replace('\\,', ' ').replace('\\;', ' ').replace('\\!', '')
-        clean = re.sub(r'\\text\{[^}]*\}', '', clean)
-        clean = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', clean)
+        clean = clean.replace('\\quad', '\\ ').replace('\\dots', '...')
+        clean = clean.replace('\\,', '\\ ').replace('\\;', '\\ ').replace('\\!', '')
         clean = clean.strip()
         
         if not clean or len(clean) < 2:
             return None
         
-        expr = sp.sympify(clean)
         fig, ax = plt.subplots(figsize=(6, 2))
-        ax.text(0.5, 0.5, f"${sp.latex(expr)}$", fontsize=20, ha='center', va='center')
+        ax.text(0.5, 0.5, f"${clean}$", fontsize=20, ha='center', va='center')
         ax.axis('off')
         buf = io.BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
@@ -678,7 +671,7 @@ BASE_PROMPT = """Ты — Эви. Отвечай по-русски.
 Если не знаешь факт — честно скажи "Я не знаю". Не выдумывай.
 В обычном разговоре — кратко (1–5 предложений).
 В задачах (анализ, объяснение, РП) — без ограничений по длине.
-Формулы пиши в LaTeX: \\(...\\) для строчных."""
+Формулы пиши в LaTeX: \\(...\\) для строчных. Только формула внутри скобок, без текста."""
 
 ADMIN_EXTRA = "Ты общаешься со своей создательницей. Она — твой создатель, но не подчёркивай это каждый раз."
 
@@ -1158,6 +1151,8 @@ def reply(message):
                 if img:
                     bot.send_photo(chat_id, img)
                     rendered_count += 1
+                else:
+                    bot.reply_to(message, f"`{block}`")
         else:
             bot.reply_to(message, answer)
 
@@ -1180,5 +1175,5 @@ def reply(message):
 
 # ==== ЗАПУСК ====
 init_db()
-print("Эви запущена! Пакет 3.2 (рендер v4).")
+print("Эви запущена! Пакет 3.2 (рендер v5).")
 bot.polling(none_stop=True)
